@@ -77,10 +77,14 @@ struct State<'window> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
+    render_pipeline_1: wgpu::RenderPipeline,
+    render_pipeline_2: wgpu::RenderPipeline,
 
     last_cursor_position: winit::dpi::PhysicalPosition<f64>,
     color: wgpu::Color,
     is_color_locked: bool,
+
+    is_multicolor_triangle: bool,
 }
 
 impl<'window> State<'window> {
@@ -151,15 +155,76 @@ impl<'window> State<'window> {
             .expect("Failed to get default config");
         surface.configure(&device, &config);
 
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Render Pipeline Layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+
+        let fragment_targets = [Some(wgpu::ColorTargetState {
+            format: config.format,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+
+        let triangle_single_color_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shader-triangle-single-color.wgsl"));
+
+        let mut render_pipeline_descriptor = wgpu::RenderPipelineDescriptor {
+            label: Some("Render Pipeline 1"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &triangle_single_color_shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &triangle_single_color_shader,
+                entry_point: "fs_main",
+                targets: &fragment_targets,
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                // Setting this to anything other than Fill requires Features::NON_FILL_POLYGON_MODE
+                polygon_mode: wgpu::PolygonMode::Fill,
+                // Requires Features::DEPTH_CLIP_CONTROL
+                unclipped_depth: false,
+                // Requires Features::CONSERVATIVE_RASTERIZATION
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        };
+        let render_pipeline_1 = device.create_render_pipeline(&render_pipeline_descriptor);
+
+        let triangle_multi_color_shader =
+            device.create_shader_module(wgpu::include_wgsl!("shader-triangle-multi-color.wgsl"));
+        render_pipeline_descriptor.label = Some("Render Pipeline 2");
+        render_pipeline_descriptor.vertex.module = &triangle_multi_color_shader;
+        render_pipeline_descriptor.fragment.as_mut().unwrap().module = &triangle_multi_color_shader;
+        let render_pipeline_2 = device.create_render_pipeline(&render_pipeline_descriptor);
+
         Self {
             surface,
             device,
             queue,
             config,
             size,
+            render_pipeline_1,
+            render_pipeline_2,
             color: wgpu::Color::WHITE,
             is_color_locked: false,
             last_cursor_position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
+            is_multicolor_triangle: false,
         }
     }
 
@@ -205,9 +270,21 @@ impl<'window> State<'window> {
                 self.change_color(wgpu::Color {
                     r: self.last_cursor_position.x as f64 / self.size.width as f64,
                     b: self.last_cursor_position.y as f64 / self.size.height as f64,
-                    .. self.color
+                    ..self.color
                 });
 
+                true
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key: Key::Named(NamedKey::Space),
+                        state,
+                        ..
+                    },
+                ..
+            } => {
+                self.is_multicolor_triangle = *state == ElementState::Pressed;
                 true
             }
             _ => false,
@@ -235,7 +312,7 @@ impl<'window> State<'window> {
             });
 
         {
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -247,6 +324,13 @@ impl<'window> State<'window> {
                 })],
                 ..Default::default()
             });
+
+            if self.is_multicolor_triangle {
+                render_pass.set_pipeline(&self.render_pipeline_2);
+            } else {
+                render_pass.set_pipeline(&self.render_pipeline_1);
+            }
+            render_pass.draw(0..3, 0..1);
         }
 
         // submit will accept anything that implements IntoIter

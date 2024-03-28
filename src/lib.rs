@@ -1,10 +1,53 @@
 use log::*;
+use wgpu::util::DeviceExt;
 use winit::{
     event::*,
     event_loop::{ControlFlow, EventLoop, EventLoopWindowTarget},
     keyboard::{Key, NamedKey},
     window::{Window, WindowBuilder},
 };
+
+mod vertex;
+use vertex::Vertex;
+
+
+//       C       I
+//     D   B   J   H
+//   E       A       G
+//
+//
+//           F
+#[rustfmt::skip]
+const VERTICES: &[Vertex] = &[
+    Vertex { position: [   0.0,  -0.60, 0.0],  color: [0.5, 0.0, 0.5] }, // F 0
+    Vertex { position: [   0.0,   0.20, 0.0],  color: [0.5, 0.0, 0.5] }, // A 1
+    Vertex { position: [ -0.65,   0.20, 0.0],  color: [0.5, 0.0, 0.5] }, // E 2
+    Vertex { position: [  0.65,   0.20, 0.0],  color: [0.5, 0.0, 0.5] }, // G 3
+    Vertex { position: [ -0.12,   0.41, 0.0],  color: [0.5, 0.0, 0.5] }, // B 4
+    Vertex { position: [  0.12,   0.41, 0.0],  color: [0.5, 0.0, 0.5] }, // J 5
+    Vertex { position: [ -0.61, 0.4025, 0.0],  color: [0.5, 0.0, 0.5] }, // D 6
+    Vertex { position: [  0.61, 0.4025, 0.0],  color: [0.5, 0.0, 0.5] }, // H 7
+    Vertex { position: [-0.375,  0.575, 0.0],  color: [0.5, 0.0, 0.5] }, // C 8
+    Vertex { position: [ 0.375,  0.575, 0.0],  color: [0.5, 0.0, 0.5] }, // I 9
+];
+
+#[rustfmt::skip]
+const INDICES: &[u16] = &[
+    // ABC
+    1, 4, 8,
+    // CDE
+    8, 6, 2,
+    // ACE
+    1, 8, 2,
+    // GHI
+    3, 7, 9,
+    // IJA
+    9, 5, 1,
+    // IAG
+    9, 1, 3,
+    // EFG
+    2, 0, 3,
+];
 
 pub async fn run() {
     env_logger::init();
@@ -77,14 +120,17 @@ struct State<'window> {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     size: winit::dpi::PhysicalSize<u32>,
-    render_pipeline_1: wgpu::RenderPipeline,
-    render_pipeline_2: wgpu::RenderPipeline,
+
+    curr_pipeline_idx: usize,
+    render_pipelines: [wgpu::RenderPipeline; 3],
+
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    num_indices: u32,
 
     last_cursor_position: winit::dpi::PhysicalPosition<f64>,
     color: wgpu::Color,
     is_color_locked: bool,
-
-    is_multicolor_triangle: bool,
 }
 
 impl<'window> State<'window> {
@@ -213,18 +259,43 @@ impl<'window> State<'window> {
         render_pipeline_descriptor.fragment.as_mut().unwrap().module = &triangle_multi_color_shader;
         let render_pipeline_2 = device.create_render_pipeline(&render_pipeline_descriptor);
 
+        let heart_shader = device.create_shader_module(wgpu::include_wgsl!("shader-heart.wgsl"));
+        let vertex_buffer = [Vertex::buffer_layout()];
+        render_pipeline_descriptor.label = Some("Render Pipeline 3");
+        render_pipeline_descriptor.vertex.module = &heart_shader;
+        render_pipeline_descriptor.vertex.buffers = &vertex_buffer;
+        render_pipeline_descriptor.fragment.as_mut().unwrap().module = &heart_shader;
+        let render_pipeline_3 = device.create_render_pipeline(&render_pipeline_descriptor);
+
+        let render_pipelines = [render_pipeline_1, render_pipeline_2, render_pipeline_3];
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(INDICES),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let num_indices = INDICES.len() as u32;
+
         Self {
             surface,
             device,
             queue,
             config,
             size,
-            render_pipeline_1,
-            render_pipeline_2,
+            curr_pipeline_idx: render_pipelines.len() - 1,
+            render_pipelines,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
             color: wgpu::Color::WHITE,
             is_color_locked: false,
             last_cursor_position: winit::dpi::PhysicalPosition::new(0.0, 0.0),
-            is_multicolor_triangle: false,
         }
     }
 
@@ -279,12 +350,12 @@ impl<'window> State<'window> {
                 event:
                     KeyEvent {
                         logical_key: Key::Named(NamedKey::Space),
-                        state,
+                        state: ElementState::Pressed,
                         ..
                     },
                 ..
             } => {
-                self.is_multicolor_triangle = *state == ElementState::Pressed;
+                self.curr_pipeline_idx = (self.curr_pipeline_idx + 1) % self.render_pipelines.len();
                 true
             }
             _ => false,
@@ -325,12 +396,16 @@ impl<'window> State<'window> {
                 ..Default::default()
             });
 
-            if self.is_multicolor_triangle {
-                render_pass.set_pipeline(&self.render_pipeline_2);
+            render_pass.set_pipeline(&self.render_pipelines[self.curr_pipeline_idx]);
+
+            if self.curr_pipeline_idx == 0 || self.curr_pipeline_idx == 1 {
+                render_pass.draw(0..3, 0..1);
             } else {
-                render_pass.set_pipeline(&self.render_pipeline_1);
+                render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                render_pass
+                    .set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
             }
-            render_pass.draw(0..3, 0..1);
         }
 
         // submit will accept anything that implements IntoIter
